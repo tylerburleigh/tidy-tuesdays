@@ -234,6 +234,8 @@ ranger_workflow %>%
   extract_workflow() -> final_model
 
 confusionMatrix(predict(final_model, test)$.pred_class, test$yesno, mode='everything', positive='TRUE')
+```
+
 Performance on the test set is similar to the training performance. Overall, accuracy is pretty good. It seems we're letting some spam mail through, which is why we see that sensitivity is somewhat low. For a spam detection filter, we'd want to bias towards minimizing false positives, and here we see that the specificity was quite good at ~95%.
 
 # Unsupervised learning
