@@ -1,0 +1,117 @@
+
+```{r, message=FALSE}
+library(tidyverse)
+library(wbstats)
+library(ggtext)
+df <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-22/population.csv')
+
+options(scipen=999)
+```
+
+# Defining a scope
+
+For this analysis, I'm going to focus on refugees. And I'm going to focus specifically on the countries from which refugees are fleeing -- i.e., "Countries of Origin", as well as the year 2022. For that reason, I'm going to drop a number columns from the dataset. I'm also going to drop some redundant location columns (`coo`, since I have `coo_iso`). Later I'll add a filter for the year 2022.
+
+This gives me a smaller set of data, and consequently, a narrower scope of questions that I can ask of it.
+
+# Data cleaning
+
+Something I had noticed about the dataset before filtering out many of the columns is that a COO could have multiple records in a year if refugees were leaving for different COAs. This means that I'll want to group by COO and take a sum of refugees, even when looking at a specific year.
+
+```{r}
+df %>%
+  filter(year == 2022) %>%
+  # Need a group and sum here because COOs have multiple COAs per year
+  group_by(coo_name) %>%
+  # Convert refugees to refugees in units of millions
+  summarize(refugees = sum(refugees)/1000000,
+            coo_iso = first(coo_iso)) -> df_clean
+```
+
+# Data exploration
+
+Next, I want to understand which Countries of Origin (COO) had the most refugees leaving in 2022.
+
+```{r}
+df_clean %>%
+  arrange(refugees) %>%
+  slice_tail(n=10) %>%
+  ggplot(aes(x=refugees, y=fct_inorder(coo_name))) +
+    geom_bar(stat='identity') +
+    ggtitle('Top 10 countries from which refugees are fleeing') +
+    xlab('# Refugees (Millions)') +
+    ylab('Country of Origin (COO)')
+```
+
+# Enriching the dataset
+
+Next, I want to enrich the dataset with third-party data so I can add another dimension to the visualization: a country's economic status. Specifically, I want to identify the "poorer" countries using GNI per capita. According to a [United Nations report from 2014](https://www.un.org/en/development/desa/policy/wesp/wesp_current/2014wesp_country_classification.pdf):
+
+> Countries with less than $1,035 GNI per capita are classified as low-income countries, those with between $1,036 and $4,085 as lower middle income countries, those with between $4,086 and $12,615 as upper middle income countries, and those with incomes of more than $12,615 as high-income countries.
+
+I'll use these values suggested by the UN to identify countries by income status, and I'll use the `wbstats` plugin to fetch GNI per capita data from the World Bank.
+
+It took a bit of searching, but I decided on `NY.GNP.PCAP.KD` because it seemed to have good coverage (compared to some of the other GNI per capita variables). And since it's adjusted based on 2010 US dollars, it's relatively normalized which makes comparisons across countries much easier.
+
+```{r}
+wb_search("NY.GNP.PCAP.KD", fields='indicator_id')
+```
+
+I'll fetch more than just 2022 data, because this will give me more flexibility to impute values if they are missing for 2022 specifically: For each COO, I can just take the most recent GNI per capita value.
+
+```{r}
+gni_per_capita <- wb_data("NY.GNP.PCAP.CD", start_date = 2000, end_date = 2022) %>%
+  select(iso3c, date, "NY.GNP.PCAP.CD") %>%
+  rename(gni_per_capita = "NY.GNP.PCAP.CD",
+         iso = iso3c)
+
+df_clean %>%
+  left_join(gni_per_capita, by=c('coo_iso'='iso')) -> df_enriched
+```
+
+With this GDP per capita variable, I'm missing values for around 5% of COOs. Not too bad.
+
+```{r}
+df_enriched %>%
+  group_by(coo_name) %>%
+  # In case of multiple records, take most recent
+  summarize(gni_per_capita = last(gni_per_capita, order_by = date, na_rm = T)) %>%
+  ungroup() %>%
+  summarize(n = n(),
+            n_missing = sum(is.na(gni_per_capita)),
+            pct_missing = sum(is.na(gni_per_capita))/n()*100)
+```
+
+I will create a new dataframe that again collapses across the years, taking the most recent GNI per capita, and then classifying the nation.
+
+```{r}
+df_enriched %>%
+  group_by(coo_name) %>%
+  summarize(gni_per_capita = last(gni_per_capita, order_by = date, na_rm = T),
+            refugees = first(refugees)) %>%
+  mutate(gni_class = case_when(gni_per_capita <= 1035 ~ 'low income',
+                               gni_per_capita > 1035 & gni_per_capita < 4035 ~ 'lower income',
+                               .default = 'unknown or not low/lower')) %>%
+  select(coo_name, gni_class, gni_per_capita, refugees) -> df_enriched
+```
+
+# New data visualization 
+
+With the GNI income classifications ready, I can regenerate the visualization and colour the bars to represent nations that have been classified as low or lower income. I will also make the title more specific to the point that I'm trying to make with the visualization, and add a caption to provide context about what the classifications represent.
+
+```{r}
+df_enriched %>%
+  arrange(refugees) %>%
+  slice_tail(n=10) %>%
+  ggplot(aes(x=refugees, y=fct_inorder(coo_name), fill=gni_class)) +
+    geom_bar(stat='identity', show.legend = FALSE) +
+    ggtitle("In 2022, <strong>8 of the top 10</strong> nations by number of refugees leaving<br>would be classified as <span style='color: #e00000'><strong>low</span></strong> or <span style='color: #f55555'><strong>lower</span></strong> income*") +
+    xlab('# Refugees (Millions)') +
+    ylab('')+
+    scale_fill_manual(values=c("#e00000",
+                               "#f55555",
+                               "grey")) +
+    labs(caption = "<span style='font-size:7pt'>*Low and lower income was defined as GNI per capita <$1,035 and <$4,085 USD in 2010 dollars, respectively.<br>Also note that GNI per capita data was missing for some nations.</span>") +
+    theme(plot.title = element_markdown(),
+          plot.caption = element_markdown())
+```
