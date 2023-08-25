@@ -2,3 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+*.Rproj
+spam-email/%
+2023-08-15-spam-email/%
