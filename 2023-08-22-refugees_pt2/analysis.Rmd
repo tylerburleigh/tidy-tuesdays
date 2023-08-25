@@ -58,7 +58,7 @@ df_enriched %>%
   head()
 ```
 
-Next, I'll compute a new variable: `refugees_per_1k_pop` that represents refugees leaving per 1000 persons in the original population. This is a good way to normalize, because we'd expect a lrger count of refugees leaving from countries that had more people to begin with.
+Next, I'll compute a new variable: `refugees_per_1k_pop` that represents refugees leaving per 1000 persons in the original population. This is a good way to normalize, because we'd expect a larger count of refugees leaving from countries that had more people to begin with.
 
 ```{r, message=F}
 df_enriched %>%
