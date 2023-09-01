@@ -1,0 +1,237 @@
+
+Today I'l be tackling Week 
+
+```{r, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(DescTools) # for %like%
+library(stringr)
+library(fuzzyjoin)
+library(gt)
+fair_use_cases <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_cases.csv')
+fair_use_findings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_findings.csv')
+```
+
+From the [dataset description](https://github.com/rfordatascience/tidytuesday/blob/master/data/2023/2023-08-29/readme.md):
+
+> The data this week comes from the U.S. Copyright Office Fair Use Index.
+
+>> Fair use is a longstanding and vital aspect of American copyright law. The goal of the Index is to make the principles and application of fair use more accessible and understandable to the public by presenting a searchable database of court opinions, including by category and type of use (e.g., music, internet/digitization, parody).
+
+> There are two datasets this week for which the rows align, but the values might not precisely line up for a clean join -- a case you often have to deal with in real-world data.
+
+This last point tells me that data cleaning will be important here.
+
+# Data cleaning
+
+## Exploration
+
+I'll start by identifying the columns on which I might join.
+
+```{r}
+glimpse(fair_use_cases)
+```
+
+```{r}
+glimpse(fair_use_findings)
+```
+
+# Approach 1: Direct match
+
+Judging from the above, `case` should loosely match with `title`.
+
+I'll try the simplest approach first: matching `case` directly to `title`.
+
+```{r}
+251-sum(fair_use_cases$case %in% fair_use_findings$title)
+```
+
+Out of 251 records, 245 did not match. Not very good!
+
+# Approach 2: Fuzzy matching `title` with `case`
+
+I noticed that `title` tends to be a substring of `case`. Given this, I can try a fuzzy matching approach. I'll use `fuzzy_left_join()` from the `fuzzyjoin` library. I'll also join using year, just in case.
+
+```{r}
+fair_use_cases %>% 
+  fuzzy_left_join(fair_use_findings %>% select(-court, -outcome), 
+                  by = c("case" = "title", "year" = "year"), 
+                  match_fun = str_detect) %>%
+  select(-year.y) %>%
+  rename(year = year.x) -> fuzzy_join
+
+(fuzzy_join %>%
+  filter(is.na(title)) %>%
+  distinct(case, title) %>%
+  count())$n
+```
+
+This seems promising: only 37 records did not match.
+
+```{r}
+## Identify the missing cases from each set
+fuzzy_join %>%
+  filter(is.na(title)) %>%
+  select(colnames(fair_use_cases)) -> cases_without_match
+
+fair_use_findings %>%
+  filter(!title %in% fuzzy_join$title) -> findings_without_match
+
+cases_without_match %>%
+  select(case, year) %>%
+  arrange(case, year) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Cases without a match in Findings")
+
+findings_without_match %>%
+  select(title, case_number, year) %>%
+  arrange(title, year) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Findings without a match in Cases")
+```
+
+Some observations about these missing cases:
+
+- Non-ASCII characters like `ó` or ```
+
+- `Serv.` vs. `Servs.`
+
+- Punctuation inconsistencies, like `Nat'l Acad. of TV Arts & Scis., Inc.` vs. `Nat'l Acad. of TV Arts & Scis., Inc.,`
+
+- `LLC` is sometimes missing, like `Tresona Multimedia, LLC` vs. `Tresona Multimedia v.`
+
+These steps could improve the match rate:
+
+1. Convert to ASCII
+
+2. Convert to lowercase
+
+3. Remove occurrences of `LLC`
+
+I'll perform these standardizations and try joining again.
+
+```{r}
+# Mutate a standardized variable: case_std
+fair_use_cases %>%
+  mutate(case_std = tolower(case),
+         case_std = iconv(case_std, to='ASCII//TRANSLIT'),
+         case_std = str_replace_all(case_std, "[^[:alnum:][:space:]]", ""),
+         case_std = str_replace_all(case_std, 'llc', '')) -> fair_use_cases_std
+
+# Mutate a standardized variable: title_std
+fair_use_findings %>%
+  mutate(year = str_sub(year, 1, 4),
+         title_std = tolower(title),
+         title_std = iconv(title_std, to='ASCII//TRANSLIT'),
+         title_std = str_replace_all(title_std, "[^[:alnum:][:space:]]", ""),
+         title_std = str_replace_all(title_std, 'llc', '')) -> fair_use_findings_std
+
+# Perform a fuzzy join
+fair_use_cases_std %>% 
+  fuzzy_left_join(fair_use_findings_std %>% select(-year, -court, -outcome), 
+                  by = c("case_std" = "title_std"), 
+                  match_fun = str_detect) -> fuzzy_join
+
+## Identify the missing cases from each set
+fuzzy_join %>%
+  filter(is.na(title)) %>%
+  select(colnames(fair_use_cases)) -> fair_use_cases_remainder
+
+fair_use_findings_std %>%
+  filter(!title %in% fuzzy_join$title) -> fair_use_findings_remainder
+
+fair_use_cases_remainder %>%
+  select(case, year) %>%
+  arrange(case, year) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Cases without a match in Findings")
+
+fair_use_findings_remainder %>%
+  select(title, case_number, year) %>%
+  arrange(title, year) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Findings without a match in Cases")
+```
+
+I can see that 16 are missing in each case, and what's interesting about these two sets is they appear to be the same items, in the same order. This means we can simply do a `bind_cols()` operation to join them together
+
+# Final data cleaning / joining solution
+
+Here I put together all of the lessons learned so far into one final chunk of code.
+
+```{r, message=F}
+fair_use_cases <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_cases.csv')
+fair_use_findings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_findings.csv')
+
+# Mutate a standardized variable: case_std
+fair_use_cases %>%
+  mutate(case_std = tolower(case),
+         case_std = iconv(case_std, to='ASCII//TRANSLIT'),
+         case_std = str_replace_all(case_std, "[^[:alnum:][:space:]]", ""),
+         case_std = str_replace_all(case_std, 'llc', '')) %>% 
+  select(-court, -outcome) -> fair_use_cases_std
+
+# Mutate a standardized variable: title_std
+fair_use_findings %>%
+  mutate(year = str_sub(year, 1, 4),
+         title_std = tolower(title),
+         title_std = iconv(title_std, to='ASCII//TRANSLIT'),
+         title_std = str_replace_all(title_std, "[^[:alnum:][:space:]]", ""),
+         title_std = str_replace_all(title_std, 'llc', '')) -> fair_use_findings_std
+
+# Perform a fuzzy join
+fair_use_cases_std %>% 
+  fuzzy_left_join(fair_use_findings_std, 
+                  by = c("case_std" = "title_std", "year" = "year"), 
+                  match_fun = str_detect) %>%
+  select(-case_std, 
+         -title_std,
+         -year.y) %>%
+  rename(year = year.x) -> fuzzy_join
+
+## Identify the missing cases from each set
+fuzzy_join %>%
+  filter(is.na(title)) %>%
+  select(colnames(fair_use_cases)) -> fair_use_cases_remainder
+
+fair_use_findings_std %>% 
+  select(-year, -court, -outcome) %>%
+  filter(!title %in% fuzzy_join$title) -> fair_use_findings_remainder
+
+# Bind the columns together
+fair_use_cases_remainder %>%
+  select(colnames(fair_use_cases)) %>%
+  bind_cols(fair_use_findings_remainder) -> remainders_join
+
+# Join together
+fuzzy_join %>%
+  filter(!is.na(title)) %>%
+  bind_rows(remainders_join) -> final_join
+```
+
+Now when inspecting the final result I expect to see 251 rows; none of which should be duplicates.
+
+```{r}
+final_join %>%
+  summarize(
+    n_rows = n(),
+    n_distinct_rows = n_distinct(case, title)
+  )
+```
+
+And as a final check, I can scroll through the results and see if anything jumps out as being amiss.
+
+```{r}
+final_join %>% 
+  select(case, title, case_number) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Final results table")
+```
+
+It looks like the matches are correct.
+
