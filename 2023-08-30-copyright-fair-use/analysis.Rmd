@@ -1,17 +1,4 @@
 
-Today I'l be tackling Week 
-
-```{r, message=FALSE}
-library(tidyverse)
-library(tidymodels)
-library(DescTools) # for %like%
-library(stringr)
-library(fuzzyjoin)
-library(gt)
-fair_use_cases <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_cases.csv')
-fair_use_findings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_findings.csv')
-```
-
 From the [dataset description](https://github.com/rfordatascience/tidytuesday/blob/master/data/2023/2023-08-29/readme.md):
 
 > The data this week comes from the U.S. Copyright Office Fair Use Index.
@@ -20,13 +7,17 @@ From the [dataset description](https://github.com/rfordatascience/tidytuesday/bl
 
 > There are two datasets this week for which the rows align, but the values might not precisely line up for a clean join -- a case you often have to deal with in real-world data.
 
-This last point tells me that data cleaning will be important here.
+This last point is what I'll be focusing on in this post: The challenge of joining two datasets together that don't line up for a clean join.
 
-# Data cleaning
+```{r, message=FALSE}
+library(tidyverse)
+library(fuzzyjoin)
+library(gt)
+fair_use_cases <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_cases.csv')
+fair_use_findings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_findings.csv')
+```
 
-## Exploration
-
-I'll start by identifying the columns on which I might join.
+# Glimpse
 
 ```{r}
 glimpse(fair_use_cases)
@@ -36,21 +27,37 @@ glimpse(fair_use_cases)
 glimpse(fair_use_findings)
 ```
 
-# Approach 1: Direct match
+# Approach 0: column binding
 
-Judging from the above, `case` should loosely match with `title`.
-
-I'll try the simplest approach first: matching `case` directly to `title`.
+I wonder if a simple `bind_cols()` could work?
 
 ```{r}
-251-sum(fair_use_cases$case %in% fair_use_findings$title)
+fair_use_cases %>% 
+  arrange(case, year) -> fair_use_sorted
+fair_use_findings %>% 
+  arrange(title, case_number, year) %>% 
+  select(-year, -outcome, -court) -> fair_use_findings_sorted
+fair_use_sorted %>%
+  bind_cols(fair_use_findings_sorted) -> bind_cols_join
 ```
 
-Out of 251 records, 245 did not match. Not very good!
+No, as we can see there is some mis-alignment with this approach: `case` and `title` do not match.
 
-# Approach 2: Fuzzy matching `title` with `case`
+```{r}
+bind_cols_join %>%
+  select(case, title) %>%
+  head(111) %>%
+  tail(3) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "bind_cols() results") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
+```
 
-I noticed that `title` tends to be a substring of `case`. Given this, I can try a fuzzy matching approach. I'll use `fuzzy_left_join()` from the `fuzzyjoin` library. I'll also join using year, just in case.
+# Approach 1: Fuzzy joining
+
+I noticed that `title` tends to be a substring of `case`. Given this, I can try "fuzzy matching" I'll use the `fuzzyjoin` library. I'll also join with year, just in case there are multiple substring matches this should help to better resolve them to their correct match.
 
 ```{r}
 fair_use_cases %>% 
@@ -66,7 +73,9 @@ fair_use_cases %>%
   count())$n
 ```
 
-This seems promising: only 37 records did not match.
+This seems promising: only 37 records did not match. Can I fine-tune it?
+
+I find that it always helps to look at examples of errors and see what can be learned.
 
 ```{r}
 ## Identify the missing cases from each set
@@ -82,17 +91,21 @@ cases_without_match %>%
   arrange(case, year) %>%
   gt() %>%
   opt_interactive() %>%
-  tab_header(title = "Cases without a match in Findings")
+  tab_header(title = "Cases without a match in Findings") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
 
 findings_without_match %>%
   select(title, case_number, year) %>%
   arrange(title, year) %>%
   gt() %>%
   opt_interactive() %>%
-  tab_header(title = "Findings without a match in Cases")
+  tab_header(title = "Findings without a match in Cases") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
 ```
 
-Some observations about these missing cases:
+Some observations about these examples that may have caused mis-matching:
 
 - Non-ASCII characters like `ó` or ```
 
@@ -111,6 +124,8 @@ These steps could improve the match rate:
 3. Remove occurrences of `LLC`
 
 I'll perform these standardizations and try joining again.
+
+# Approach 2: Fuzzy joining + string cleaning
 
 ```{r}
 # Mutate a standardized variable: case_std
@@ -147,26 +162,27 @@ fair_use_cases_remainder %>%
   arrange(case, year) %>%
   gt() %>%
   opt_interactive() %>%
-  tab_header(title = "Cases without a match in Findings")
+  tab_header(title = "Cases without a match in Findings") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
 
 fair_use_findings_remainder %>%
   select(title, case_number, year) %>%
   arrange(title, year) %>%
   gt() %>%
   opt_interactive() %>%
-  tab_header(title = "Findings without a match in Cases")
+  tab_header(title = "Findings without a match in Cases") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
 ```
 
-I can see that 16 are missing in each case, and what's interesting about these two sets is they appear to be the same items, in the same order. This means we can simply do a `bind_cols()` operation to join them together
+I can see that 16 are missing in each case, and what's interesting about these two sets is they appear to be the same items, in the same order. This means we can simply do a `bind_cols()` operation to join them together.
 
-# Final data cleaning / joining solution
+# Final solution: Fuzzy joining + string cleaning + column binding
 
-Here I put together all of the lessons learned so far into one final chunk of code.
+Here I put all of the lessons learned so far in fuzzy joining together into one final chunk of code.
 
 ```{r, message=F}
-fair_use_cases <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_cases.csv')
-fair_use_findings <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2023/2023-08-29/fair_use_findings.csv')
-
 # Mutate a standardized variable: case_std
 fair_use_cases %>%
   mutate(case_std = tolower(case),
@@ -193,7 +209,7 @@ fair_use_cases_std %>%
          -year.y) %>%
   rename(year = year.x) -> fuzzy_join
 
-## Identify the missing cases from each set
+# Identify the missing cases from each set
 fuzzy_join %>%
   filter(is.na(title)) %>%
   select(colnames(fair_use_cases)) -> fair_use_cases_remainder
@@ -207,13 +223,16 @@ fair_use_cases_remainder %>%
   select(colnames(fair_use_cases)) %>%
   bind_cols(fair_use_findings_remainder) -> remainders_join
 
-# Join together
+# Join together the two subsets
 fuzzy_join %>%
   filter(!is.na(title)) %>%
-  bind_rows(remainders_join) -> final_join
+  bind_rows(remainders_join) %>% 
+  arrange(case, title, year) -> final_join
 ```
 
-Now when inspecting the final result I expect to see 251 rows; none of which should be duplicates.
+## Validation checks
+
+When inspecting the final result I expect to see 251 rows; none of which should be duplicates, and I do.
 
 ```{r}
 final_join %>%
@@ -223,15 +242,57 @@ final_join %>%
   )
 ```
 
-And as a final check, I can scroll through the results and see if anything jumps out as being amiss.
+As another check, I can look at the same records that were misaligned with the first approach. I can see they are now aligned.
+
+```{r}
+final_join %>% 
+  select(case, title, case_number) %>%
+  head(111) %>%
+  tail(3) %>%
+  gt() %>%
+  opt_interactive() %>%
+  tab_header(title = "Rows that were previously misaligned with bind_cols() are now aligned") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
+```
+
+And here is the full table.
 
 ```{r}
 final_join %>% 
   select(case, title, case_number) %>%
   gt() %>%
   opt_interactive() %>%
-  tab_header(title = "Final results table")
+  tab_header(title = "Final results table (case, title, case_number)") %>%
+  tab_options(table.background.color = '#f1f3f5',
+              ihtml.page_size_default = 3)
 ```
 
-It looks like the matches are correct.
+It looks like the matches are now correct.
+
+# Data visualization
+
+And now for a quick data viz showing the journey towards achieving 100% matches between the two data frames.
+
+```{r}
+data.frame("method" = c("fuzzy joining", 
+                        "fuzzy joining + \nstring cleaning", 
+                        "fuzzy joining + \nstring cleaning + \ncolumn binding"),
+           "match_rate" = c((251-37)/251*100, (251-16)/251*100, 100),
+           "class" = c(FALSE, FALSE, TRUE)) %>%
+  ggplot(aes(x = method, y = match_rate, fill=class)) +
+    geom_bar(stat="identity", colour="black") +
+    geom_text(aes(label = paste0(round(match_rate), "%")), colour="black", vjust=-.2) +
+    xlab("Method") +
+    ylab("Match Rate") +
+    ggtitle("Percentage of matches found between<br><span style='font-family:monospace;color:red'>fair_use_cases</span> and <span style='font-family:monospace;color:red'>fair_use_findings</span><br>by method(s) used") +
+    ggthemes::theme_fivethirtyeight() +
+    gghighlight::gghighlight(class == TRUE, unhighlighted_params = list(fill="grey", colour="black")) +
+    theme(plot.title = ggtext::element_markdown(),
+          plot.caption = ggtext::element_markdown())
+```
+
+```{r}
+ggsave('social-image.png', height=5, width=10)
+```
 
